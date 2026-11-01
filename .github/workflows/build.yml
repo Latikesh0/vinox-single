@@ -1,0 +1,121 @@
+name: Build APKs and Publish to All-Release
+
+on:
+  push:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    name: Build and Publish APKs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Prepare and Verify APKs
+        env:
+          APP_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p output_apks
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+
+          test -f "$DEBUG_APK" || {
+            echo "Debug APK not found at $DEBUG_APK"
+            echo "If your project uses product flavors or a different app module, update this path."
+            exit 1
+          }
+
+          test -f "$RELEASE_APK" || {
+            echo "Release APK not found at $RELEASE_APK"
+            echo "If your project uses product flavors or a different app module, update this path."
+            exit 1
+          }
+
+          cp "$DEBUG_APK" "output_apks/${APP_NAME}-Debug.apk"
+          cp "$RELEASE_APK" "output_apks/${APP_NAME}-Release.apk"
+          ls -lh output_apks/
+
+      - name: Upload APKs as Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-APKs
+          path: output_apks/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Push APKs to All-Release Repository Folder
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: "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"
+          APP_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "Missing RELEASETOKEN secret. Add it in this source repository's Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+          git clone https://github.com/Latikesh0/All-Release.git target_repo
+          cd target_repo
+
+          git remote set-url origin \
+            "https://x-access-token:${TOKEN}@github.com/Latikesh0/All-Release.git"
+
+          mkdir -p "$APP_NAME"
+          cp "../output_apks/${APP_NAME}-Debug.apk" "$APP_NAME/"
+          cp "../output_apks/${APP_NAME}-Release.apk" "$APP_NAME/"
+
+          git add -f -- "$APP_NAME/${APP_NAME}-Debug.apk" "$APP_NAME/${APP_NAME}-Release.apk"
+
+          if git diff --cached --quiet; then
+            echo "No APK changes to commit; existing files are already up to date."
+          else
+            git commit -m "Update ${APP_NAME} APKs (source run #${GITHUB_RUN_NUMBER})"
+            git push origin HEAD:main
+          fi
+
+      - name: Publish GitHub Release in All-Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: Latikesh0/All-Release
+          token: "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"
+          tag_name: "all-apps-latest"             # <-- TEENO REPO MEIN SAME TAG NAME
+          name: "All Apps Latest Release"           # <-- SAME RELEASE TITLE
+          target_commitish: main
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            output_apks/${{ github.event.repository.name }}-Debug.apk
+            output_apks/${{ github.event.repository.name }}-Release.apk
